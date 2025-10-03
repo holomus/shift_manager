@@ -144,6 +144,9 @@ class ShiftGeneratorService:
                     if d < 0 or d >= num_days:
                         continue
                     for shift in shift_templates:
+                        if shift.usage_penalty > 0:
+                            continue
+
                         shift_start = shift.start_minute
                         shift_end = shift.end_minute
 
