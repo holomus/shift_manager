@@ -24,7 +24,7 @@ class ShiftGeneratorService:
             shift_templates: list[ShiftTemplate],
             job_demands: list[JobDemand],
             work_constraints: WorkConstraints,
-    ) -> list[Shift]:
+    ) -> tuple[str, float, list[Shift]]:
         model = cp_model.CpModel()
 
         shift_templates = sorted(shift_templates, key=lambda x: x.start_minute)
@@ -249,7 +249,7 @@ class ShiftGeneratorService:
                 f"Stats:\n{solver.ResponseStats()}"
             )
         
-        shifts_result = []
+        shifts_result: list[Shift] = []
 
         for (employee_id, job_id, template_id, d), var in shifts.items():
             if (solver.boolean_value(var)):
@@ -279,5 +279,5 @@ class ShiftGeneratorService:
                         )
                     )
 
-        return shifts_result
+        return (solver.status_name(status), solver.objective_value, shifts_result)
                         
