@@ -34,5 +34,5 @@ def solve_by_week(
     return {
         "status": status,
         "objective_value": objective_value,
-        "shifts": shifts
+        "shifts": sorted(shifts, key=lambda x: (x.day_of_week, x.employee_id or ""))
     }

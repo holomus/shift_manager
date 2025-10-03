@@ -1,14 +1,10 @@
 from entity import EmployeeInfo, ShiftTemplate, JobDemand, Shift, WorkConstraints
-from google.protobuf import text_format
 from ortools.sat.python import cp_model
-
-from absl import flags
-
-_PARAMS = flags.DEFINE_string(
-    "params", "max_time_in_seconds:10.0", "Sat solver parameters."
-)
+from fastapi import HTTPException
 
 class ShiftGeneratorService:
+    _MAX_SOLVE_TIME_IN_SECONDS = 10.0
+
     def _get_shift_name(
             self,
             employee_id: str,
@@ -67,6 +63,7 @@ class ShiftGeneratorService:
                     shifts[employee.employee_id, job.job_id, shift.template_id, d]
                     for job in employee.available_jobs
                     for shift in shift_templates
+                    if (employee.employee_id, job.job_id, shift.template_id, d) in shifts
                 )
 
         # Minimal rest between shifts.
@@ -90,13 +87,11 @@ class ShiftGeneratorService:
                                     shift2_start += 24 * 60
                                     shift2_day += 1
 
-                                if shift2_start < shift1_end + work_constraints.min_rest_minutes:
-                                    model.AddBoolXOr(
-                                        (
-                                            shifts[employee.employee_id, job1.job_id, shift1.template_id, d],
-                                            shifts[employee.employee_id, job2.job_id, shift2.template_id, shift2_day]
-                                        )
-                                    )
+                                key1 = (employee.employee_id, job1.job_id, shift1.template_id, d)
+                                key2 = (employee.employee_id, job2.job_id, shift2.template_id, shift2_day)
+
+                                if key1 in  shifts and key2 in shifts and shift2_start < shift1_end + work_constraints.min_rest_minutes:
+                                    model.AddBoolOr([shifts[key1].Not(), shifts[key2].Not()])
 
         # Weekly work time constraints.
         for employee in employees:
@@ -115,22 +110,31 @@ class ShiftGeneratorService:
                 model.add(total_weekly_minutes == sum(total_minutes))
 
                 excess = model.new_int_var(
-                    -work_constraints.soft_max_weekly_minutes,
-                    work_constraints.hard_max_weekly_minutes - work_constraints.soft_max_weekly_minutes,
+                    -work_constraints.regular_weekly_minutes,
+                    work_constraints.hard_max_weekly_minutes - work_constraints.regular_weekly_minutes,
                     f"excess_{employee.employee_id}"
                 )
-                model.add(excess == total_weekly_minutes - work_constraints.soft_max_weekly_minutes)
-
+                model.add(excess == total_weekly_minutes - work_constraints.regular_weekly_minutes)
+    
                 overwork = model.new_int_var(
                     0,
-                    work_constraints.hard_max_weekly_minutes - work_constraints.soft_max_weekly_minutes,
+                    work_constraints.hard_max_weekly_minutes - work_constraints.regular_weekly_minutes,
                     f"overwork_{employee.employee_id}"
                 )
+                model.add_max_equality(overwork, [excess, 0]) # overwork = max(0, excess)
 
-                model.add_max_equality(overwork, [excess, 0])
+                underwork = model.new_int_var(
+                    0,
+                    work_constraints.regular_weekly_minutes,
+                    f"underwork_{employee.employee_id}"
+                )
+                model.add_max_equality(underwork, [-excess, 0]) # underwork = max(0, -excess)
 
                 obj_int_vars.append(overwork)
-                obj_int_coeffs.append(work_constraints.soft_max_weekly_minutes_penalty)
+                obj_int_coeffs.append(work_constraints.over_weekly_minutes_penalty)
+                
+                obj_int_vars.append(underwork)
+                obj_int_coeffs.append(work_constraints.over_weekly_minutes_penalty)
 
         # Add open shifts to model
         open_shifts = {}
@@ -152,20 +156,21 @@ class ShiftGeneratorService:
                             shift_end += 24 * 60
 
                         # only allow open shifts that overlap this demand
-                        if shift.start_minute < demand.end_minute and shift.end_minute > demand.start_minute:
-                            key = (job_demand.job_id, shift.template_id, demand.day_of_week)
-                            open_shifts[key] = model.new_int_var(
-                                0, demand.demand,  # upper bound = at most demand
-                                f"open_shifts_{job_demand.job_id}_{shift.template_id}_{demand.day_of_week}"
-                            )
-                            # penalize each open shift
-                            obj_int_vars.append(open_shifts[key])
-                            obj_int_coeffs.append(job_demand.open_shift_penalty)
+                        if shift_start < demand.end_minute and shift_end > demand.start_minute:
+                            key = (job_demand.job_id, shift.template_id, d)
+                            if key not in open_shifts:
+                                open_shifts[key] = model.new_int_var(
+                                    0, demand.demand,  # upper bound = at most demand
+                                    f"open_shifts_{job_demand.job_id}_{shift.template_id}_{d}"
+                                )
+                                # penalize each open shift
+                                obj_int_vars.append(open_shifts[key])
+                                obj_int_coeffs.append(job_demand.open_shift_penalty)
 
         for job_demand in job_demands:
-            coverage_terms = []
             demand_intervals = sorted(job_demand.demand_intervals, key=lambda x: (x.day_of_week, x.start_minute))
             for demand in demand_intervals:
+                coverage_terms = []
                 for employee in employees:
                     if job_demand.job_id in [job.job_id for job in employee.available_jobs]:
                         for d in range(demand.day_of_week - 1, demand.day_of_week + 2):
@@ -204,7 +209,7 @@ class ShiftGeneratorService:
                             shift_start += 24 * 60
                             shift_end += 24 * 60
 
-                        key = (job_demand.job_id, shift.template_id, demand.day_of_week)
+                        key = (job_demand.job_id, shift.template_id, d)
                         if key in open_shifts:
                             overlap = min(shift_end, demand.end_minute) - max(shift_start, demand.start_minute)
                             if overlap > 0:
@@ -214,12 +219,12 @@ class ShiftGeneratorService:
                 required_minutes = demand.demand * demand.get_duration()
 
                 unmet = model.new_int_var(
-                    0, demand.demand,
+                    0, demand.demand  * demand.get_duration(),
                     f"unmet_{demand.day_of_week}_{demand.start_minute}_{demand.end_minute}"
                 )
 
                 excess = model.new_int_var(
-                    0, len(employees) - demand.demand,
+                    0, (len(employees) - demand.demand) * demand.get_duration(),
                     f"excess_{demand.day_of_week}_{demand.start_minute}_{demand.end_minute}"
                 )
 
@@ -238,15 +243,20 @@ class ShiftGeneratorService:
         )
 
         solver = cp_model.CpSolver()
-        text_format.Parse(_PARAMS.value, solver.parameters)
+        
+        solver.parameters.max_time_in_seconds = self._MAX_SOLVE_TIME_IN_SECONDS
         
         solution_printer = cp_model.ObjectiveSolutionPrinter()
         status = solver.solve(model, solution_printer)
 
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            raise Exception(
-                f"No solution found. Status: {status}\n"
-                f"Stats:\n{solver.ResponseStats()}"
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "No feasible solution found",
+                    "solver_status": solver.status_name(status),
+                    "stats": solver.ResponseStats(),
+                },
             )
         
         shifts_result: list[Shift] = []
