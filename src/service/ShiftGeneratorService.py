@@ -46,8 +46,9 @@ class ShiftGeneratorService:
                     for d in range(num_days):
                         if d == 0:
                             last_shift = employee.last_sunday_shift
-                            if last_shift is not None and shift.start_minute < last_shift.end_minute - 24 * 60 + work_constraints.min_rest_minutes:
-                                continue
+                            if last_shift is not None and last_shift.end_minute is not None:
+                                if shift.start_minute < last_shift.end_minute - 24 * 60 + work_constraints.min_rest_minutes:
+                                    continue
 
                         shifts[
                             employee.employee_id,
@@ -131,6 +132,35 @@ class ShiftGeneratorService:
                 obj_int_vars.append(overwork)
                 obj_int_coeffs.append(work_constraints.soft_max_weekly_minutes_penalty)
 
+        # Add open shifts to model
+        open_shifts = {}
+        for job_demand in job_demands:
+            for demand in job_demand.demand_intervals:
+                for d in range(demand.day_of_week - 1, demand.day_of_week + 2):
+                    if d < 0 or d >= num_days:
+                        continue
+                    for shift in shift_templates:
+                        shift_start = shift.start_minute
+                        shift_end = shift.end_minute
+
+                        if d < demand.day_of_week:
+                            shift_start -= 24 * 60
+                            shift_end -= 24 * 60
+
+                        if d > demand.day_of_week:
+                            shift_start += 24 * 60
+                            shift_end += 24 * 60
+
+                        # only allow open shifts that overlap this demand
+                        if shift.start_minute < demand.end_minute and shift.end_minute > demand.start_minute:
+                            key = (job_demand.job_id, shift.template_id, demand.day_of_week)
+                            open_shifts[key] = model.new_int_var(
+                                0, demand.demand,  # upper bound = at most demand
+                                f"open_shifts_{job_demand.job_id}_{shift.template_id}_{demand.day_of_week}"
+                            )
+                            # penalize each open shift
+                            obj_int_vars.append(open_shifts[key])
+                            obj_int_coeffs.append(job_demand.open_shift_penalty)
 
         for job_demand in job_demands:
             coverage_terms = []
@@ -157,7 +187,28 @@ class ShiftGeneratorService:
                                     overlap = min(shift_end, demand.end_minute) - max(shift_start, demand.start_minute)
                                     if overlap > 0:
                                         shift_var = shifts[employee.employee_id, job_demand.job_id, shift.template_id, d]
-                                        coverage_terms.append(shift_var * overlap)                                    
+                                        coverage_terms.append(shift_var * overlap)   
+
+                for d in range(demand.day_of_week - 1, demand.day_of_week + 2):
+                    if d < 0 or d >= num_days:
+                        continue
+                    for shift in shift_templates:
+                        shift_start = shift.start_minute
+                        shift_end = shift.end_minute
+
+                        if d < demand.day_of_week:
+                            shift_start -= 24 * 60
+                            shift_end -= 24 * 60
+
+                        if d > demand.day_of_week:
+                            shift_start += 24 * 60
+                            shift_end += 24 * 60
+
+                        key = (job_demand.job_id, shift.template_id, demand.day_of_week)
+                        if key in open_shifts:
+                            overlap = min(shift_end, demand.end_minute) - max(shift_start, demand.start_minute)
+                            if overlap > 0:
+                                coverage_terms.append(open_shifts[key] * overlap)                                 
 
                 actual_coverage = sum(coverage_terms) if coverage_terms else 0
                 required_minutes = demand.demand * demand.get_duration()
@@ -175,10 +226,10 @@ class ShiftGeneratorService:
                 model.add(actual_coverage + unmet - excess == required_minutes)
 
                 obj_int_vars.append(unmet)
-                obj_int_coeffs.append(job_demand.under_coverage_penalty_coefficient)    # cost per missing person-minute
+                obj_int_coeffs.append(job_demand.under_coverage_penalty)    # cost per missing person-minute
 
                 obj_int_vars.append(excess)
-                obj_int_coeffs.append(job_demand.over_coverage_penalty_coefficient)   # cost per extra person-minute
+                obj_int_coeffs.append(job_demand.over_coverage_penalty)   # cost per extra person-minute
 
 
         model.minimize(
@@ -200,21 +251,33 @@ class ShiftGeneratorService:
         
         shifts_result = []
 
-        for employee in employees:
-            for job in employee.available_jobs:
-                for shift in shift_templates:
-                    for d in range(num_days):
-                        if (solver.boolean_value(shifts[employee.employee_id, job.job_id, shift.template_id, d])):
-                            shifts_result.append(
-                                Shift(
-                                    employee_id=employee.employee_id,
-                                    job_id=job.job_id,
-                                    template_id=shift.template_id,
-                                    day_of_week=d,
-                                    start_minute=shift.start_minute,
-                                    end_minute=shift.end_minute,
-                                )
-                            )
+        for (employee_id, job_id, template_id, d), var in shifts.items():
+            if (solver.boolean_value(var)):
+                shifts_result.append(
+                    Shift(
+                        employee_id=employee_id,
+                        job_id=job_id,
+                        template_id=template_id,
+                        day_of_week=d,
+                        start_minute=None,
+                        end_minute=None,
+                    )
+                )
+
+        for (job_id, template_id, d), var in open_shifts.items():
+            count = solver.value(var)
+            if count > 0:
+                for _ in range(count):
+                    shifts_result.append(
+                        Shift(
+                            employee_id=None,
+                            job_id=job_id,
+                            template_id=template_id,
+                            day_of_week=d,
+                            start_minute=None,
+                            end_minute=None,
+                        )
+                    )
 
         return shifts_result
                         

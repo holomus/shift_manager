@@ -5,5 +5,5 @@ class Shift(BaseModel):
     template_id: str
     job_id: str
     day_of_week: int
-    start_minute: int
-    end_minute: int
+    start_minute: int | None
+    end_minute: int | None
