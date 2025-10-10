@@ -110,34 +110,27 @@ class ShiftGeneratorService:
                 model.add(total_weekly_minutes == sum(total_minutes))
 
                 excess = model.new_int_var(
-                    -work_constraints.regular_weekly_minutes,
-                    work_constraints.hard_max_weekly_minutes - work_constraints.regular_weekly_minutes,
+                    -work_constraints.soft_max_weekly_minutes,
+                    work_constraints.hard_max_weekly_minutes - work_constraints.soft_max_weekly_minutes,
                     f"excess_{employee.employee_id}"
                 )
-                model.add(excess == total_weekly_minutes - work_constraints.regular_weekly_minutes)
+                model.add(excess == total_weekly_minutes - work_constraints.soft_max_weekly_minutes)
     
                 overwork = model.new_int_var(
                     0,
-                    work_constraints.hard_max_weekly_minutes - work_constraints.regular_weekly_minutes,
+                    work_constraints.hard_max_weekly_minutes - work_constraints.soft_max_weekly_minutes,
                     f"overwork_{employee.employee_id}"
                 )
                 model.add_max_equality(overwork, [excess, 0]) # overwork = max(0, excess)
 
-                underwork = model.new_int_var(
-                    0,
-                    work_constraints.regular_weekly_minutes,
-                    f"underwork_{employee.employee_id}"
-                )
-                model.add_max_equality(underwork, [-excess, 0]) # underwork = max(0, -excess)
-
                 obj_int_vars.append(overwork)
-                obj_int_coeffs.append(work_constraints.over_weekly_minutes_penalty)
-                
-                obj_int_vars.append(underwork)
                 obj_int_coeffs.append(work_constraints.over_weekly_minutes_penalty)
 
         # Add open shifts to model
         open_shifts = {}
+        max_demand_per_key = {}
+
+        # First pass: compute max demand per (job_id, shift_template, day)
         for job_demand in job_demands:
             for demand in job_demand.demand_intervals:
                 for d in range(demand.day_of_week - 1, demand.day_of_week + 2):
@@ -153,22 +146,30 @@ class ShiftGeneratorService:
                         if d < demand.day_of_week:
                             shift_start -= 24 * 60
                             shift_end -= 24 * 60
-
-                        if d > demand.day_of_week:
+                        elif d > demand.day_of_week:
                             shift_start += 24 * 60
                             shift_end += 24 * 60
 
                         # only allow open shifts that overlap this demand
                         if shift_start < demand.end_minute and shift_end > demand.start_minute:
                             key = (job_demand.job_id, shift.template_id, d)
-                            if key not in open_shifts:
-                                open_shifts[key] = model.new_int_var(
-                                    0, demand.demand,  # upper bound = at most demand
-                                    f"open_shifts_{job_demand.job_id}_{shift.template_id}_{d}"
-                                )
-                                # penalize each open shift
-                                obj_int_vars.append(open_shifts[key])
-                                obj_int_coeffs.append(job_demand.open_shift_penalty)
+                            max_demand_per_key[key] = max(
+                                max_demand_per_key.get(key, 0),
+                                demand.demand
+                            )
+
+        # Second pass: create open shift variables using the maximum demand per key
+        for key, max_demand in max_demand_per_key.items():
+            job_id, template_id, d = key
+            open_shifts[key] = model.new_int_var(
+                0,
+                max_demand,
+                f"open_shifts_{job_id}_{template_id}_{d}"
+            )
+
+            # Optionally add penalties if needed
+            obj_int_vars.append(open_shifts[key])
+            obj_int_coeffs.append(job_demand.open_shift_penalty)
 
         for job_demand in job_demands:
             demand_intervals = sorted(job_demand.demand_intervals, key=lambda x: (x.day_of_week, x.start_minute))
@@ -227,7 +228,8 @@ class ShiftGeneratorService:
                 )
 
                 excess = model.new_int_var(
-                    0, (len(employees) - demand.demand) * demand.get_duration(),
+                    # 0, (len(employees) - demand.demand) * demand.get_duration(),
+                    0, (demand.demand) * demand.get_duration(),
                     f"excess_{demand.day_of_week}_{demand.start_minute}_{demand.end_minute}"
                 )
 
