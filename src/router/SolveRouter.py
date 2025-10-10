@@ -36,3 +36,7 @@ def solve_by_week(
         "objective_value": objective_value,
         "shifts": sorted(shifts, key=lambda x: (x.day_of_week, x.employee_id or ""))
     }
+
+# Need to have 2 more methods:
+#  1. Generating only open shifts
+#  2. Assigning employees to already generated shifts

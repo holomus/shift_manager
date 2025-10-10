@@ -10,16 +10,35 @@ class ShiftGeneratorService:
             employee_id: str,
             job_id: str,
             template_id: str,
-            dayOfWeek: int,
+            day_of_week: int,
     ) -> str:
-        return f"shift_{employee_id}_{job_id}_{template_id}_{dayOfWeek}"
+        return f"shift_{employee_id}_{job_id}_{template_id}_{day_of_week}"
+
+    def _add_employee_work_constraints(
+            self, 
+            model: cp_model.CpModel,
+            employees: list[EmployeeInfo], 
+            shift_templates: list[ShiftTemplate],
+            shifts: list[Shift]
+    ) -> tuple[list[cp_model.IntVar], list[int], list[cp_model.BoolVarT], list[int]]:
+        return [], [], [], []
+
+    def _add_open_shifts(
+            self, 
+            model: cp_model.CpModel,
+            shift_templates: list[ShiftTemplate], 
+            job_demands: list[JobDemand]
+    ) -> tuple[list[cp_model.IntVar], list[int], list[cp_model.BoolVarT], list[int]]:
+        if len(job_demands) == 0:
+            return [], [], [], []
+        return [], [], [], []
 
     def generate_shifts_by_week(
             self,
             employees: list[EmployeeInfo],
             shift_templates: list[ShiftTemplate],
             job_demands: list[JobDemand],
-            work_constraints: WorkConstraints,
+            shifts: list[Shift]
     ) -> tuple[str, float, list[Shift]]:
         model = cp_model.CpModel()
 
@@ -168,8 +187,8 @@ class ShiftGeneratorService:
             )
 
             # Optionally add penalties if needed
-            obj_int_vars.append(open_shifts[key])
-            obj_int_coeffs.append(job_demand.open_shift_penalty)
+            # obj_int_vars.append(open_shifts[key])
+            # obj_int_coeffs.append(job_demand.open_shift_penalty)
 
         for job_demand in job_demands:
             demand_intervals = sorted(job_demand.demand_intervals, key=lambda x: (x.day_of_week, x.start_minute))
